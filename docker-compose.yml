@@ -1,0 +1,8 @@
+services:
+  url-shortener:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./urls.db:/app/urls.db
+      - ./config.txt:/app/config.txt
