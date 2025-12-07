@@ -9,10 +9,26 @@
 
 sqlite3* db;
 
-void log(const std::string& message) {
+void log_to_db(const std::string& level, const std::string& message, const std::string& ip = "", const std::string& user_agent = "") {
+    const char* sql = "INSERT INTO logs (timestamp, level, message, ip, user_agent) VALUES (datetime('now'), ?, ?, ?, ?);";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, level.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, message.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, ip.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 4, user_agent.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            std::cout << "Failed to log to DB" << std::endl;
+        }
+        sqlite3_finalize(stmt);
+    }
+}
+
+void log(const std::string& message, const std::string& level = "INFO", const std::string& ip = "", const std::string& user_agent = "") {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     std::cout << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << " - " << message << std::endl;
+    log_to_db(level, message, ip, user_agent);
 }
 
 int load_config() {
@@ -34,10 +50,10 @@ int load_config() {
 }
 
 void init_db() {
-    const char* sql = "CREATE TABLE IF NOT EXISTS urls (short_code TEXT PRIMARY KEY, url TEXT); CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON urls(url);";
+    const char* sql = "CREATE TABLE IF NOT EXISTS urls (short_code TEXT PRIMARY KEY, url TEXT); CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON urls(url); CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, level TEXT, message TEXT, ip TEXT, user_agent TEXT);";
     char* err_msg = nullptr;
     if (sqlite3_exec(db, sql, nullptr, nullptr, &err_msg) != SQLITE_OK) {
-        log("Failed to create table/index: " + std::string(err_msg));
+        log("Failed to create tables: " + std::string(err_msg));
         sqlite3_free(err_msg);
     } else {
         log("Database initialized");
@@ -131,27 +147,31 @@ int main() {
     CROW_ROUTE(app, "/shorten")
         .methods("POST"_method)
         ([&](const crow::request& req) {
-            log("Received shorten request");
+            std::string ip = req.get_header_value("X-Forwarded-For");
+            if (ip.empty()) ip = req.get_header_value("X-Real-IP");
+            if (ip.empty()) ip = "unknown";
+            std::string ua = req.get_header_value("User-Agent");
+            log("Received shorten request", "INFO", ip, ua);
             auto body = crow::json::load(req.body);
             if (!body || !body.has("url")) {
-                log("Invalid request: missing or invalid JSON");
+                log("Invalid request: missing or invalid JSON", "WARN", ip, ua);
                 return crow::response(400, "Invalid JSON or missing 'url' field");
             }
             std::string url = body["url"].s();
             if (url.empty() || url.find("http") != 0) {
-                log("Invalid URL: " + url);
+                log("Invalid URL: " + url, "WARN", ip, ua);
                 return crow::response(400, "Invalid URL");
             }
             std::string existing_code = get_short_code(url);
             if (!existing_code.empty()) {
-                log("URL already shortened: " + url + " -> " + existing_code);
+                log("URL already shortened: " + url + " -> " + existing_code, "INFO", ip, ua);
                 crow::json::wvalue response;
                 response["short_url"] = "http://localhost:8080/" + existing_code;
                 return crow::response(response);
             }
             std::string short_code = generate_short();
             insert_url(short_code, url);
-            log("Shortened URL: " + url + " to " + short_code);
+            log("Shortened URL: " + url + " to " + short_code, "INFO", ip, ua);
             crow::json::wvalue response;
             response["short_url"] = "http://localhost:8080/" + short_code;
             return crow::response(response);
@@ -159,37 +179,47 @@ int main() {
 
     CROW_ROUTE(app, "/<string>")
         .methods("GET"_method)
-        ([&](std::string short_code) {
+        ([&](const crow::request& req, std::string short_code) {
+            std::string ip = req.get_header_value("X-Forwarded-For");
+            if (ip.empty()) ip = req.get_header_value("X-Real-IP");
+            if (ip.empty()) ip = "unknown";
+            std::string ua = req.get_header_value("User-Agent");
             if (short_code.empty()) {
+                log("Invalid short code request", "WARN", ip, ua);
                 return crow::response(400, "Invalid short code");
             }
-            log("Redirect request for: " + short_code);
+            log("Redirect request for: " + short_code, "INFO", ip, ua);
             std::string url = get_url(short_code);
             if (!url.empty()) {
-                log("Redirecting to: " + url);
+                log("Redirecting to: " + url, "INFO", ip, ua);
                 crow::response res(302);
                 res.add_header("Location", url);
                 return res;
             } else {
-                log("Short URL not found: " + short_code);
+                log("Short URL not found: " + short_code, "WARN", ip, ua);
                 return crow::response(404, "Short URL not found");
             }
         });
 
     CROW_ROUTE(app, "/delete/<string>")
         .methods("DELETE"_method)
-        ([&](std::string short_code) {
+        ([&](const crow::request& req, std::string short_code) {
+            std::string ip = req.get_header_value("X-Forwarded-For");
+            if (ip.empty()) ip = req.get_header_value("X-Real-IP");
+            if (ip.empty()) ip = "unknown";
+            std::string ua = req.get_header_value("User-Agent");
             if (short_code.empty()) {
+                log("Invalid delete request", "WARN", ip, ua);
                 return crow::response(400, "Invalid short code");
             }
-            log("Delete request for: " + short_code);
+            log("Delete request for: " + short_code, "INFO", ip, ua);
             std::string url = get_url(short_code);
             if (!url.empty()) {
                 delete_url(short_code);
-                log("Deleted URL: " + short_code);
+                log("Deleted URL: " + short_code, "INFO", ip, ua);
                 return crow::response(200, "Deleted");
             } else {
-                log("Short URL not found: " + short_code);
+                log("Short URL not found: " + short_code, "WARN", ip, ua);
                 return crow::response(404, "Short URL not found");
             }
         });
