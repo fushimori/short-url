@@ -30,7 +30,7 @@ int load_config() {
         }
         file.close();
     }
-    return 6; // default
+    return 6;
 }
 
 void init_db() {
